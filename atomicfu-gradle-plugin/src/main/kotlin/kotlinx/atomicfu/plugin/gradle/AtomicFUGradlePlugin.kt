@@ -18,6 +18,9 @@ import org.jetbrains.kotlin.gradle.plugin.*
 import java.io.*
 import java.util.*
 import java.util.concurrent.*
+import org.jetbrains.kotlin.gradle.targets.js.*
+import org.jetbrains.kotlin.gradle.targets.js.ir.KotlinJsIrTarget
+import org.jetbrains.kotlinx.atomicfu.gradle.*
 
 private const val EXTENSION_NAME = "atomicfu"
 private const val ORIGINAL_DIR_NAME = "originalClassesDir"
@@ -30,6 +33,11 @@ open class AtomicFUGradlePlugin : Plugin<Project> {
         val pluginVersion = rootProject.buildscript.configurations.findByName("classpath")
             ?.allDependencies?.find { it.name == "atomicfu-gradle-plugin" }?.version
         extensions.add(EXTENSION_NAME, AtomicFUPluginExtension(pluginVersion))
+        if (config.transformJs && config.jsVariant == "IR") {
+            // if js transformation is turned on and the IR transformation variant is chosen
+            // apply the gradle plugin that supports application of the compiler plugin
+            plugins.apply(AtomicfuKotlinGradleSubplugin::class.java)
+        }
         configureDependencies()
         configureTasks()
     }
@@ -43,12 +51,13 @@ private fun Project.configureDependencies() {
         )
         dependencies.add(TEST_IMPLEMENTATION_CONFIGURATION, getAtomicfuDependencyNotation(Platform.JVM, version))
     }
-    withPluginWhenEvaluatedDependencies("kotlin2js") { version ->
+    withPluginWhenEvaluatedDependencies("org.jetbrains.kotlin.js") { version ->
         dependencies.add(
             if (config.transformJs) COMPILE_ONLY_CONFIGURATION else IMPLEMENTATION_CONFIGURATION,
             getAtomicfuDependencyNotation(Platform.JS, version)
         )
         dependencies.add(TEST_IMPLEMENTATION_CONFIGURATION, getAtomicfuDependencyNotation(Platform.JS, version))
+        addCompilerPluginDependency()
     }
     withPluginWhenEvaluatedDependencies("kotlin-multiplatform") { version ->
         configureMultiplatformPluginDependencies(version)
@@ -70,15 +79,19 @@ private fun Project.configureTasks() {
             }
         }
     }
-    withPluginWhenEvaluated("kotlin2js") {
+    withPluginWhenEvaluated("org.jetbrains.kotlin.js") {
         if (config.transformJs) {
-            configureTransformTasks("compileTestKotlin2Js") { sourceSet, transformedDir, originalDir ->
-                createJsTransformTask(sourceSet).configureJsTask(
-                    sourceSet.classesTaskName,
-                    transformedDir,
-                    originalDir,
-                    config
-                )
+            withKotlinTargets { target ->
+                // skip if the compiler plugin should be applied to the jsIr target
+                if (needsJsIrTransformation(target)) return@withKotlinTargets
+                configureTransformTasks("compileTestKotlin2Js") { sourceSet, transformedDir, originalDir ->
+                    createJsTransformTask(sourceSet).configureJsTask(
+                        sourceSet.classesTaskName,
+                        transformedDir,
+                        originalDir,
+                        config
+                    )
+                }
             }
         }
     }
@@ -86,6 +99,27 @@ private fun Project.configureTasks() {
         configureMultiplatformPluginTasks()
     }
 }
+
+private fun Project.needsJsIrTransformation(target: KotlinTarget): Boolean =
+    config.transformJs && config.jsVariant == "IR" && target.isJsIrTarget()
+
+private fun Project.addCompilerPluginDependency() {
+    val kotlinVersion = rootProject.buildscript.configurations.findByName("classpath")
+        ?.allDependencies?.find { it.name == "kotlin-gradle-plugin" }?.version
+    withKotlinTargets { target ->
+        if (needsJsIrTransformation(target)) {
+            target.compilations.forEach { kotlinCompilation ->
+                kotlinCompilation.dependencies {
+                    // add compile dependency for the compiler plugin,
+                    // providing the library kotlinx-atomicfu-runtime used during transformation
+                    compileOnly("org.jetbrains.kotlin:atomicfu:$kotlinVersion")
+                }
+            }
+        }
+    }
+}
+
+private fun KotlinTarget.isJsIrTarget() = (this is KotlinJsTarget && this.irTarget != null) || this is KotlinJsIrTarget
 
 private enum class Platform(val suffix: String) {
     JVM("-jvm"),
@@ -138,9 +172,9 @@ fun Project.withKotlinTargets(fn: (KotlinTarget) -> Unit) {
     extensions.findByType(KotlinProjectExtension::class.java)?.let { kotlinExtension ->
         val targetsExtension = (kotlinExtension as? ExtensionAware)?.extensions?.findByName("targets")
         @Suppress("UNCHECKED_CAST")
-        val targets = targetsExtension as NamedDomainObjectContainer<KotlinTarget>
+        val targets = targetsExtension as? NamedDomainObjectContainer<KotlinTarget>
         // find all compilations given sourceSet belongs to
-        targets.all { target -> fn(target) }
+        targets?.all { target -> fn(target) }
     }
 }
 
@@ -182,7 +216,8 @@ fun Project.configureMultiplatformPluginTasks() {
                     )
                 }
                 KotlinPlatformType.js -> {
-                    if (!config.transformJs) return@compilations // skip when transformation is turned off
+                    // skip when js transformation is turned off or when the compiler plugin should be applied to the jsIr target
+                    if (!config.transformJs || (needsJsIrTransformation(target))) return@compilations
                     project.createJsTransformTask(compilation).configureJsTask(
                         compilation.compileAllTaskName,
                         transformedClassesDir,
@@ -196,7 +231,7 @@ fun Project.configureMultiplatformPluginTasks() {
             classesDirs.setFrom(transformedClassesDir)
             classesDirs.builtBy(transformTask)
             (tasks.findByName(target.artifactsTaskName) as? Jar)?.apply {
-                setupJarManifest(multiRelease = config.variant.toVariant() == Variant.BOTH)
+                setupJarManifest(multiRelease = config.jvmVariant.toJvmVariant() == JvmVariant.BOTH)
             }
             // test should compile and run against original production binaries
             if (compilationType == CompilationType.TEST) {
@@ -235,14 +270,15 @@ fun Project.sourceSetsByCompilation(): Map<KotlinSourceSet, List<KotlinCompilati
 
 fun Project.configureMultiplatformPluginDependencies(version: String) {
     if (rootProject.findProperty("kotlin.mpp.enableGranularSourceSetsMetadata").toString().toBoolean()) {
+        addCompilerPluginDependency()
         val mainConfigurationName = project.extensions.getByType(KotlinMultiplatformExtension::class.java).sourceSets
-                .getByName(KotlinSourceSet.COMMON_MAIN_SOURCE_SET_NAME)
-                .compileOnlyConfigurationName
+            .getByName(KotlinSourceSet.COMMON_MAIN_SOURCE_SET_NAME)
+            .compileOnlyConfigurationName
         dependencies.add(mainConfigurationName, getAtomicfuDependencyNotation(Platform.MULTIPLATFORM, version))
 
         val testConfigurationName = project.extensions.getByType(KotlinMultiplatformExtension::class.java).sourceSets
-                .getByName(KotlinSourceSet.COMMON_TEST_SOURCE_SET_NAME)
-                .implementationConfigurationName
+            .getByName(KotlinSourceSet.COMMON_TEST_SOURCE_SET_NAME)
+            .implementationConfigurationName
         dependencies.add(testConfigurationName, getAtomicfuDependencyNotation(Platform.MULTIPLATFORM, version))
 
         // For each source set that is only used in Native compilations, add an implementation dependency so that it
@@ -258,20 +294,22 @@ fun Project.configureMultiplatformPluginDependencies(version: String) {
         }
     } else {
         sourceSetsByCompilation().forEach { (sourceSet, compilations) ->
+            addCompilerPluginDependency()
             val platformTypes = compilations.map { it.platformType }.toSet()
             val compilationNames = compilations.map { it.compilationName }.toSet()
             if (compilationNames.size != 1)
                 error("Source set '${sourceSet.name}' of project '$name' is part of several compilations $compilationNames")
             val compilationType = compilationNames.single().compilationNameToType()
-                    ?: return@forEach // skip unknown compilations
+                ?: return@forEach // skip unknown compilations
             val platform =
-                    if (platformTypes.size > 1) Platform.MULTIPLATFORM else // mix of platform types -> "common"
-                        when (platformTypes.single()) {
-                            KotlinPlatformType.common -> Platform.MULTIPLATFORM
-                            KotlinPlatformType.jvm, KotlinPlatformType.androidJvm -> Platform.JVM
-                            KotlinPlatformType.js -> Platform.JS
-                            KotlinPlatformType.native -> Platform.NATIVE
-                        }
+                if (platformTypes.size > 1) Platform.MULTIPLATFORM else // mix of platform types -> "common"
+                    when (platformTypes.single()) {
+                        KotlinPlatformType.common -> Platform.MULTIPLATFORM
+                        KotlinPlatformType.jvm, KotlinPlatformType.androidJvm -> Platform.JVM
+                        KotlinPlatformType.js -> Platform.JS
+                        KotlinPlatformType.native -> Platform.NATIVE
+                        else -> error("Unsupported transformation platform '${platformTypes.single()}'")
+                    }
             val configurationName = when {
                 // impl dependency for native (there is no transformation)
                 platform == Platform.NATIVE -> sourceSet.implementationConfigurationName
@@ -305,7 +343,7 @@ fun Project.configureTransformTasks(
         //now transformTask is responsible for compiling this source set into the classes directory
         sourceSet.compiledBy(transformTask)
         (tasks.findByName(sourceSet.jarTaskName) as? Jar)?.apply {
-            setupJarManifest(multiRelease = config.variant.toVariant() == Variant.BOTH)
+            setupJarManifest(multiRelease = config.jvmVariant.toJvmVariant() == JvmVariant.BOTH)
         }
         // test should compile and run against original production binaries
         if (compilationType == CompilationType.TEST) {
@@ -331,7 +369,7 @@ fun Project.configureTransformTasks(
     }
 }
 
-fun String.toVariant(): Variant = enumValueOf(toUpperCase(Locale.US))
+fun String.toJvmVariant(): JvmVariant = enumValueOf(toUpperCase(Locale.US))
 
 fun Project.createJvmTransformTask(compilation: KotlinCompilation<*>): AtomicFUTransformTask =
     tasks.create(
@@ -363,7 +401,7 @@ fun AtomicFUTransformTask.configureJvmTask(
         classPath = classpath
         inputFiles = originalClassesDir
         outputDir = transformedClassesDir
-        variant = config.variant
+        jvmVariant = config.jvmVariant
         verbose = config.verbose
     }
 
@@ -395,7 +433,8 @@ class AtomicFUPluginExtension(pluginVersion: String?) {
     var dependenciesVersion = pluginVersion
     var transformJvm = true
     var transformJs = true
-    var variant: String = "FU"
+    var jsVariant: String = "IR"
+    var jvmVariant: String = "FU"
     var verbose: Boolean = false
 }
 
@@ -413,7 +452,7 @@ open class AtomicFUTransformTask : ConventionTask() {
     lateinit var classPath: FileCollection
 
     @Input
-    var variant = "FU"
+    var jvmVariant = "FU"
     @Input
     var verbose = false
 
@@ -422,7 +461,7 @@ open class AtomicFUTransformTask : ConventionTask() {
         val cp = classPath.files.map { it.absolutePath }
         inputFiles.files.forEach { inputDir ->
             AtomicFUTransformer(cp, inputDir, outputDir).let { t ->
-                t.variant = variant.toVariant()
+                t.jvmVariant = jvmVariant.toJvmVariant()
                 t.verbose = verbose
                 t.transform()
             }

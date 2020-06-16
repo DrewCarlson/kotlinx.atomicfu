@@ -158,7 +158,8 @@ atomicfu {
   dependenciesVersion = '0.17.0' // set to null to turn-off auto dependencies
   transformJvm = true // set to false to turn off JVM transformation
   transformJs = true // set to false to turn off JS transformation
-  variant = "FU" // JVM transformation variant: FU,VH, or BOTH 
+  jvmVariant = "FU" // JVM transformation variant: FU,VH, or BOTH 
+  jsVariant = "JS" // JS transformation variant: JS or IR
   verbose = false // set to true to be more verbose  
 }
 ```
