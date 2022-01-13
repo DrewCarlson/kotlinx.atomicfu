@@ -3,7 +3,7 @@
  */
 
 apply plugin: 'kotlinx-atomicfu'
-apply plugin: 'kotlin2js'
+apply plugin: 'org.jetbrains.kotlin.js'
 
 dependencies {
     compileOnly atomicfuJs
