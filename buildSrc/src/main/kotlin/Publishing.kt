@@ -20,7 +20,7 @@ infix fun <T> Property<T>.by(value: T) {
 fun MavenPom.configureMavenCentralMetadata(project: Project) {
     name by project.name
     description by "AtomicFU utilities"
-    url by "https://github.com/Kotlin/kotlinx.atomicfu"
+    url by "https://github.com/DrewCarlson/kotlinx.atomicfu"
 
     licenses {
         license {
@@ -32,6 +32,10 @@ fun MavenPom.configureMavenCentralMetadata(project: Project) {
 
     developers {
         developer {
+            id by "DrewCarlson"
+            name by "Drew Carlson"
+        }
+        developer {
             id by "JetBrains"
             name by "JetBrains Team"
             organization by "JetBrains"
@@ -40,7 +44,7 @@ fun MavenPom.configureMavenCentralMetadata(project: Project) {
     }
 
     scm {
-        url by "https://github.com/Kotlin/kotlinx.atomicfu"
+        url by "https://github.com/DrewCarlson/kotlinx.atomicfu"
     }
 }
 
@@ -51,7 +55,7 @@ fun mavenRepositoryUri(): URI {
         // Using implicitly created staging, for MPP it's likely to be a mistake because
         // publication on TeamCity will create 3 independent staging repositories
         System.err.println("Warning: using an implicitly created staging for atomicfu")
-        URI("https://oss.sonatype.org/service/local/staging/deploy/maven2/")
+        URI("https://s01.oss.sonatype.org/service/local/staging/deploy/maven2/")
     } else {
         URI("https://oss.sonatype.org/service/local/staging/deployByRepositoryId/$repositoryId")
     }
@@ -61,19 +65,18 @@ fun configureMavenPublication(rh: RepositoryHandler, project: Project) {
     rh.maven {
         url = mavenRepositoryUri()
         credentials {
-            username = project.getSensitiveProperty("libs.sonatype.user")
-            password = project.getSensitiveProperty("libs.sonatype.password")
+            username = project.getSensitiveProperty("sonatypeUsername")
+            password = project.getSensitiveProperty("sonatypePassword")
         }
     }
 }
 
 fun signPublicationIfKeyPresent(project: Project, publication: MavenPublication) {
-    val keyId = project.getSensitiveProperty("libs.sign.key.id")
-    val signingKey = project.getSensitiveProperty("libs.sign.key.private")
-    val signingKeyPassphrase = project.getSensitiveProperty("libs.sign.passphrase")
+    val signingKey = project.getSensitiveProperty("signingKey")
+    val signingKeyPassphrase = project.getSensitiveProperty("signingPassword")
     if (!signingKey.isNullOrBlank()) {
         project.extensions.configure<SigningExtension>("signing") {
-            useInMemoryPgpKeys(keyId, signingKey, signingKeyPassphrase)
+            useInMemoryPgpKeys(signingKey, signingKeyPassphrase)
             sign(publication)
         }
     }

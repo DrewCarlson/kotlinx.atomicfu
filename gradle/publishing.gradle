@@ -27,11 +27,16 @@ task javadocJar(type: Jar) {
     archiveClassifier = 'javadoc'
 }
 
+def ref = System.getenv("GITHUB_REF")
+if (ref != null) {
+    version = ref.substring(ref.lastIndexOf("v") + 1, ref.length())
+}
+
 publishing {
     repositories { // this: closure
         PublishingKt.configureMavenPublication(delegate, project)
     }
-    
+
     if (!isMultiplatform) {
         // Configure java publications for non-MPP projects
         publications {
